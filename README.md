@@ -8,6 +8,11 @@
 | mail.xxxxx.dion.ne.jp | SMTP Mail Server |
 | pop.xxxxx.dion.ne.jp | POP3 Mail Server |
 
+### BGB
+Listen to BGB to default port, then launch mobilesystem.py.
+
+First use Mobile Trainer to setup your account, then use any compatible game.
+
 ### WebServer
 
 Add the following line to your httpd.conf, this forces Apache to send HTTP 1.0 response rather than 1.1
