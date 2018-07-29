@@ -116,10 +116,10 @@ smtp_text = bytearray()
 
 working_socket = None
 
+DEST_IP = ""
+
 smtp_status = 0
 pop_status = 0
-
-real_username = ''
 
 dns_server_replacement = {
 	"gameboy.datacenter.ne.jp" : b'\x7F\x00\x00\x01',
@@ -240,7 +240,7 @@ def mobileAdapter(b, obj):
  
  
 def craftResponsePacket():
-    global packet_data, configuration_data, line_busy, port, expecting_ip, http_ready, response_text, system_type, pop_ready, smtp_ready, working_socket
+    global packet_data, configuration_data, line_busy, port, expecting_ip, http_ready, response_text, system_type, pop_ready, smtp_ready, working_socket, DEST_IP
     rval = 0x80 ^ packet_data['id']
  
     if(packet_data['id'] == 0x10):
@@ -257,7 +257,13 @@ def craftResponsePacket():
         # Echo that packet
  
     elif(packet_data['id'] == 0x12):
-        print('>> 12 Dial %s' % packet_data['data'][1:].decode())
+        #this contains the number that is dialed for P2P functionality. We will override this and use it as a way to input an IP address.
+        x = packet_data['data'][1:].decode()
+        if x != '#9677':
+            x = x[0:3] + "." + x[3:6] + "." + x[6:9] + "." + x[9:12]
+            x = '.'.join('{0}'.format(int(i)) for i in x.split('.'))
+        DEST_IP = x
+
         print('<< 12 Dialed')
         # Empty response
         packet_data['data'] = bytearray()
@@ -592,7 +598,11 @@ def craftHTTPResponse():
                 # Clear http_text before the next request
                 http_text = bytearray()		
                 http_data['request'] = http_data['request'].replace(b'.cgi',b'.php').replace(b'index.html',b'index.php')
-
+                if b'.php?' not in http_text:
+                    pos = http_text.find(b'?')
+                    if pos > 0:
+                        http_text = http_text[:pos] + b'.php' + http_text[pos:]
+				
                 send_text = http_data['request'] + b'\r\n'
                 for header, value in http_data['headers'].items():
                     send_text += header.encode() + b': ' + value + b'\r\n'
