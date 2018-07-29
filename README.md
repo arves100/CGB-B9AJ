@@ -44,3 +44,21 @@ An example username could be this:
 
 NOTE: The password must have one number and one letter, otherwise Mobile Trainer will not accept it.
 
+### DNS Hacking
+dns_server_replacement = {
+	"gameboy.datacenter.ne.jp" : b'\x7F\x00\x00\x01',
+	"mail.gbaa.dion.ne.jp" : b'\x7F\x00\x00\x01',
+	"pop.gbaa.dion.ne.jp" : b'\x7F\x00\x00\x01'
+}
+
+This handle DNS rewriting.
+
+It expects the domain to be rewrited (example gameboy.datacenter.ne.jp) with a bytearray telling the 4 digit of the ip.
+
+Example: if your IP is 127.0.0.1, you do an HEX of the four digits (splitted by '.')
+
+so 127 became 0x7f, 0 is 0x00 and 1 is 0x01. So the ip is 0x0f0x000x000x01.
+
+In python 0x became \x.
+
+
