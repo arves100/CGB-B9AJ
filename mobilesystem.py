@@ -85,6 +85,7 @@ pass
 
  
 # Mobile Adapter GB implementation by Háčky
+# Modified for External servers and SMTP by Arves100
 class TransferState(Enum):
     Waiting     = 0  # Waiting for the first byte of the preamble (0x99).
     Preamble    = 1  # Expecting the second byte of the preamble (0x66).
@@ -108,28 +109,23 @@ response_text = bytearray()
 http_ready = True
 pop_ready = True
 smtp_ready = True
-smtp_socket = None
-
-
 
 http_text = bytearray()
 pop_text = bytearray()
 smtp_text = bytearray()
 
-http_socket = None
-pop_socket = None
-smtp_socket = None
-
-HTTP_HOST_IP = "127.0.0.1"
-HTTP_HOST_PORT = 80
-POP_HOST_IP = "127.0.0.1"
-POP_HOST_PORT = 110
-SMTP_HOST_IP = "127.0.0.1"
-SMTP_HOST_PORT = 25
-EMAIL_DOMAIN = b'gbaa.dion.ne.jp'
+working_socket = None
 
 smtp_status = 0
 pop_status = 0
+
+real_username = ''
+
+dns_server_replacement = {
+	"gameboy.datacenter.ne.jp" : b'\x7F\x00\x00\x01',
+	"mail.gbaa.dion.ne.jp" : b'\x7F\x00\x00\x01',
+	"pop.gbaa.dion.ne.jp" : b'\x7F\x00\x00\x01'
+}
 
 def mobileAdapter(b, obj):
     global adapter_state, is_sender, packet_data
@@ -244,7 +240,7 @@ def mobileAdapter(b, obj):
  
  
 def craftResponsePacket():
-    global packet_data, configuration_data, line_busy, port, http_socket, http_ready, response_text, system_type, pop_socket, pop_ready, smtp_ready, smtp_socket
+    global packet_data, configuration_data, line_busy, port, expecting_ip, http_ready, response_text, system_type, pop_ready, smtp_ready, working_socket
     rval = 0x80 ^ packet_data['id']
  
     if(packet_data['id'] == 0x10):
@@ -300,8 +296,8 @@ def craftResponsePacket():
                 packet_data['id'] = 0x9F
                 packet_data['data'] = bytearray(b'\x00')
                 print('<< 9F POP server closed connection')
-                pop_socket.close()
-                pop_socket = None
+                working_socket.close()
+                working_socket = None
                 pop_status = 0
 				
         elif(port == 25): # SMTP
@@ -329,9 +325,9 @@ def craftResponsePacket():
             else:
                 packet_data['id'] = 0x9F
                 packet_data['data'] = bytearray(b'\x00')
-                print('<< 9F SMTP server is busy')
-                smtp_socket.close()
-                smtp_socket = None
+                print('<< 9F SMTP server closed connection')
+                working_socket.close()
+                working_socket = None
                 smtp_status = 0
 				
         elif(port == 80): # HTTP
@@ -360,8 +356,9 @@ def craftResponsePacket():
                 packet_data['id'] = 0x9F
                 packet_data['data'] = bytearray(b'\x00')
                 print('<< 9F HTTP server closed connection')
-                http_socket.close()
- 
+                working_socket.close()
+                working_socket = None
+				
         else:
             print('>> 15 Unknown protocol %d' % port)
             print('<< 15 Echoing data')
@@ -382,7 +379,7 @@ def craftResponsePacket():
         print('<< 19 Reading configuration data:')
         hexDump(configuration_data[offset : offset + length])
         packet_data['data'] = bytearray([offset]) + configuration_data[offset : offset + length]
- 
+
     elif(packet_data['id'] == 0x1A):
         offset = packet_data['data'][0]
         length = len(packet_data['data']) - 1
@@ -408,11 +405,19 @@ def craftResponsePacket():
         port = (packet_data['data'][4] << 8) + packet_data['data'][5]
         print('>> 23 Connect to %s.%s.%s.%s:%s' %
             (packet_data['data'][0], packet_data['data'][1], packet_data['data'][2], packet_data['data'][3], port))
-        print('<< A3 Connected')
         
-        packet_data['id'] = 0xA3
-        packet_data['data'] = bytearray(b'\xFF')
-		
+        try:
+            working_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            real_ip = '%s.%s.%s.%s' % (packet_data['data'][0], packet_data['data'][1], packet_data['data'][2], packet_data['data'][3])
+            working_socket.connect((real_ip, port))
+            packet_data['id'] = 0xA3
+            packet_data['data'] = bytearray(b'\xFF')
+            print('<< A3 Connected')
+        except:
+            print('<< 23 Cannot connect')
+            packet_data['id'] = 0x23 ##TODO: Please find the packet to directly abort this
+            packet_data['data'] = bytearray(b'\xFF')
+
         if port == 80:
             http_ready = True
             http_socket = None
@@ -427,13 +432,25 @@ def craftResponsePacket():
         print('>> 24 Close connection to server')
         print('<< 24 Connection closed')
         port = 0
+        working_socket.close()
+        working_socket = None
         # Echo that packet
  
     elif(packet_data['id'] == 0x28):
         print('>> 28 DNS query for %s' % packet_data['data'].decode())
-        print('<< 28 Use fake IP address 250.202.222.0')
-        packet_data['data'] = bytearray(b'\xFA\xCA\xDE\x00')
- 
+        expecting_ip = dns_server_replacement.get(packet_data['data'].decode())
+        if expecting_ip == None:
+            try:
+                expecting_ip = socket.gethostbyname(packet_data['data'].decode())
+            except:
+                print('<< Domain %s does not exists, replacing to 220.20.20.20' % (packet_data['data'].decode()))
+                expecting_ip = '220.20.20.20'
+			
+            ip_to_send = expecting_ip.split('.')
+            expecting_ip = bytes([int(ip_to_send[0]), int(ip_to_send[1]), int(ip_to_send[2]), int(ip_to_send[3])])
+
+        print("<< 28 Received DNS query %s" % expecting_ip)
+        packet_data['data'] = expecting_ip
     else:
         print('>> %02x Unknown packet' % packet_data['id'])
         print('<< %02x Echoing that packet' % packet_data['id'])
@@ -450,27 +467,17 @@ def craftResponsePacket():
 retr_start = False
 
 def craftPOPResponse():
-    global packet_data, response_text, email, POP_HOST_PORT, POP_HOST_IP, pop_socket, EMAIL_DOMAIN, retr_start
+    global packet_data, response_text, working_socket, retr_start, configuration_data
     pop_text = bytearray()
     if(len(response_text) == 0):
         if(len(packet_data['data']) > 1):
             pop_text = packet_data['data'][1:]
-			
-        if pop_socket == None:
-            try:
-                pop_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                pop_socket.connect((POP_HOST_IP, POP_HOST_PORT))
-            except:
-                print("!! Failed to connect to POP Server %s:%d" % (POP_HOST_IP, POP_HOST_PORT))
-                response_text = "E_FAIL"
 
         if b'USER' in pop_text:
-            pop_text = pop_text.replace(b'\r\n', b'@')
-            pop_text += EMAIL_DOMAIN
-            pop_text += b'\r\n'
-        pop_socket.send(pop_text)
+            pop_text = b'USER ' + configuration_data[0x2C : 0x4A] +  b'\r\n'
+        working_socket.send(pop_text)
         
-        response_text = pop_socket.recv(4096)
+        response_text = working_socket.recv(4096)
 
         expect_tab = False
         expect_space = False
@@ -522,8 +529,6 @@ def craftPOPResponse():
                 retr_start = False
  
         if not response_text or response_text == "E_FAIL":
-            pop_socket.close()
-            pop_socket = None
             response_text = b'-ERR Invalid socket\r\n'
 
     bytes_to_send = min(254, len(response_text)) # Can’t send more than 254 bytes at once
@@ -532,7 +537,7 @@ def craftPOPResponse():
     return text_to_send
 
 def craftSMTPResponse():
-    global packet_data, smtp_text, smtp_ready, response_text, smtp_socket, SMTP_HOST_IP, SMTP_HOST_PORT, smtp_status
+    global packet_data, smtp_text, smtp_ready, response_text, working_socket, SMTP_HOST_IP, SMTP_HOST_PORT, smtp_status
     if(len(response_text) == 0):
         if(len(packet_data['data']) > 1):
             smtp_text += packet_data['data'][1:]
@@ -540,16 +545,11 @@ def craftSMTPResponse():
             smtp_ready = True
 
         if(smtp_ready):
-            if smtp_socket == None:
-                smtp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                smtp_socket.connect((SMTP_HOST_IP, SMTP_HOST_PORT))	
-                smtp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-			
             if len(smtp_text) > 1:
-                smtp_socket.send(smtp_text)
+                working_socket.send(smtp_text)
 				
             if smtp_status == 0:
-                response_text = smtp_socket.recv(4096)
+                response_text = working_socket.recv(4096)
 			
             if b'354 OK' in response_text:
                 smtp_status = 1
@@ -559,13 +559,9 @@ def craftSMTPResponse():
             if(response_text is None)and(smtp_status==0):
                 print('No response known for %s' % smtp_text.decode())
                 response_text = b'503 Unknown response\r\n'
-                smtp_socket.close()
-                smtp_socket = None
                 smtp_ready = False
 				
             if b'QUIT' in smtp_text:
-                smtp_socket.close()
-                smtp_socket = None
                 smtp_ready = False
 				
             smtp_text = bytearray()
@@ -576,7 +572,7 @@ def craftSMTPResponse():
     return text_to_send
 	
 def craftHTTPResponse():
-    global packet_data, http_text, http_ready, response_text, http_socket, HTTP_HOST_IP, HTTP_HOST_PORT
+    global packet_data, http_text, http_ready, response_text, working_socket, HTTP_HOST_IP, HTTP_HOST_PORT
     if(len(response_text) == 0):
         if(len(packet_data['data']) > 1):
             http_text += packet_data['data'][1:]
@@ -594,10 +590,7 @@ def craftHTTPResponse():
  
             if(not http_ready):
                 # Clear http_text before the next request
-                http_text = bytearray()
-				
-                http_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                http_socket.connect((HTTP_HOST_IP, HTTP_HOST_PORT))				
+                http_text = bytearray()		
                 http_data['request'] = http_data['request'].replace(b'.cgi',b'.php').replace(b'index.html',b'index.php')
 
                 send_text = http_data['request'] + b'\r\n'
@@ -605,13 +598,12 @@ def craftHTTPResponse():
                     send_text += header.encode() + b': ' + value + b'\r\n'
                 send_text += b'\r\n' + http_data['content']
 					
-                http_socket.send(send_text)
-                response_text = http_socket.recv(4096)
+                working_socket.send(send_text)
+                response_text = working_socket.recv(4096)
 					
                 if(response_text is None):
                     print('No response known for %s' % http_data['request'].decode())
                     response_text = b'HTTP/1.0 404 Not Found\r\n\r\n'
-                    http_socket.close()
 
  
     bytes_to_send = min(254, len(response_text)) # Can’t send more than 254 bytes at once
